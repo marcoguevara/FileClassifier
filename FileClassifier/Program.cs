@@ -3,7 +3,7 @@ using System.Globalization;
 if (args.Length > 1 || (args.Length == 1 && args[0] is "--help" or "-h"))
 {
     Console.WriteLine("Usage: FileClassifier [folder-path]");
-    Console.WriteLine("Organizes files into YEAR\\MONTH folders based on last-modified date.");
+    Console.WriteLine("Organizes files from the folder and all subfolders into YEAR\\MONTH folders based on last-modified date.");
     Console.WriteLine("After each folder, prompts for another. Press Ctrl+C to exit.");
     return args.Length == 1 ? 0 : 1;
 }
@@ -53,7 +53,12 @@ static void OrganizeFolder(string sourcePath)
 
     try
     {
-        foreach (var sourceFile in Directory.EnumerateFiles(fullSourcePath, "*", SearchOption.TopDirectoryOnly))
+        var sourceFiles = Directory
+            .EnumerateFiles(fullSourcePath, "*", SearchOption.AllDirectories)
+            .Where(sourceFile => !IsInOrganizedFolder(fullSourcePath, sourceFile, spanishCulture))
+            .ToArray();
+
+        foreach (var sourceFile in sourceFiles)
         {
             try
             {
@@ -104,6 +109,29 @@ static string? PromptForFolder()
 {
     Console.Write("Folder path to organize (Ctrl+C to exit): ");
     return Console.ReadLine();
+}
+
+static bool IsInOrganizedFolder(string rootPath, string filePath, CultureInfo spanishCulture)
+{
+    var relativeDirectory = Path.GetRelativePath(rootPath, Path.GetDirectoryName(filePath)!);
+    var directoryParts = relativeDirectory.Split(
+        [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+        StringSplitOptions.RemoveEmptyEntries);
+
+    if (directoryParts.Length < 2 ||
+        !int.TryParse(directoryParts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var year) ||
+        directoryParts[0].Length != 4 ||
+        year == 0 ||
+        directoryParts[1].Length < 2 ||
+        !int.TryParse(directoryParts[1].AsSpan(0, Math.Min(2, directoryParts[1].Length)), NumberStyles.None, CultureInfo.InvariantCulture, out var month) ||
+        month is < 1 or > 12)
+    {
+        return false;
+    }
+
+    var monthName = spanishCulture.TextInfo.ToTitleCase(
+        new DateTime(year, month, 1).ToString("MMMM", spanishCulture));
+    return directoryParts[1] == $"{month:00} - {monthName}";
 }
 
 static string GetAvailableDestinationPath(string destinationDirectory, string fileName)
