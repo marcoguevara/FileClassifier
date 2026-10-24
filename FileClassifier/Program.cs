@@ -110,6 +110,11 @@ static void OrganizeFolder(string sourcePath)
 
 static DateTime GetDateForOrganization(string filePath)
 {
+    if (TryGetDateFromFileName(filePath, out var fileNameDate))
+    {
+        return fileNameDate;
+    }
+
     var extension = Path.GetExtension(filePath).ToLowerInvariant();
     var isPhoto = extension is
         ".jpg" or ".jpeg" or ".jpe" or ".tif" or ".tiff" or ".png" or
@@ -151,6 +156,30 @@ static DateTime GetDateForOrganization(string filePath)
     }
 
     return File.GetLastWriteTime(filePath);
+}
+
+static bool TryGetDateFromFileName(string filePath, out DateTime date)
+{
+    var fileName = Path.GetFileNameWithoutExtension(filePath);
+    var hasExpectedPrefix = fileName.StartsWith("IMG_", StringComparison.OrdinalIgnoreCase) ||
+                            fileName.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
+
+    if (hasExpectedPrefix &&
+        fileName.Length == 19 &&
+        fileName[12] == '_' &&
+        fileName.AsSpan(13).ToString().All(char.IsLetterOrDigit) &&
+        DateTime.TryParseExact(
+            fileName.AsSpan(4, 8),
+            "yyyyMMdd",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out date))
+    {
+        return true;
+    }
+
+    date = default;
+    return false;
 }
 
 static int GetDateTagPriority(string tagName, bool isPhoto)
