@@ -1,9 +1,12 @@
 using System.Globalization;
+using ImageMetadataReader = MetadataExtractor.ImageMetadataReader;
+using ImageProcessingException = MetadataExtractor.ImageProcessingException;
 
 if (args.Length > 1 || (args.Length == 1 && args[0] is "--help" or "-h"))
 {
     Console.WriteLine("Usage: FileClassifier [folder-path]");
-    Console.WriteLine("Organizes files from the folder and all subfolders into YEAR\\MONTH folders based on last-modified date.");
+    Console.WriteLine("Organizes files from the folder and all subfolders into YEAR\\MONTH folders.");
+    Console.WriteLine("Photos and videos use their capture date when available; other files use last-modified date.");
     Console.WriteLine("After each folder, prompts for another. Press Ctrl+C to exit.");
     return args.Length == 1 ? 0 : 1;
 }
@@ -62,10 +65,10 @@ static void OrganizeFolder(string sourcePath)
         {
             try
             {
-                var lastModified = File.GetLastWriteTime(sourceFile);
-                var yearFolder = lastModified.ToString("yyyy", CultureInfo.InvariantCulture);
-                var monthName = spanishCulture.TextInfo.ToTitleCase(lastModified.ToString("MMMM", spanishCulture));
-                var monthFolder = $"{lastModified:MM} - {monthName}";
+                var fileDate = GetDateForOrganization(sourceFile);
+                var yearFolder = fileDate.ToString("yyyy", CultureInfo.InvariantCulture);
+                var monthName = spanishCulture.TextInfo.ToTitleCase(fileDate.ToString("MMMM", spanishCulture));
+                var monthFolder = $"{fileDate:MM} - {monthName}";
                 var destinationDirectory = Path.Combine(fullSourcePath, yearFolder, monthFolder);
                 Directory.CreateDirectory(destinationDirectory);
 
@@ -103,6 +106,124 @@ static void OrganizeFolder(string sourcePath)
     }
 
     Console.WriteLine($"Finished. Moved: {movedCount}; failed: {failedCount}.");
+}
+
+static DateTime GetDateForOrganization(string filePath)
+{
+    var extension = Path.GetExtension(filePath).ToLowerInvariant();
+    var isPhoto = extension is
+        ".jpg" or ".jpeg" or ".jpe" or ".tif" or ".tiff" or ".png" or
+        ".heic" or ".heif" or ".webp" or ".avif" or ".bmp" or ".gif" or ".ico" or
+        ".dng" or ".3fr" or ".arw" or ".cr2" or ".cr3" or ".crw" or ".gpr" or
+        ".kdc" or ".nef" or ".orf" or ".pef" or ".raf" or ".rw2" or ".rwl" or
+        ".srw" or ".pcx" or ".psd" or ".tga";
+    var isVideo = extension is ".mp4" or ".mov" or ".avi" or ".m4v" or ".3gp" or ".3g2";
+
+    if (!isPhoto && !isVideo)
+    {
+        return File.GetLastWriteTime(filePath);
+    }
+
+    try
+    {
+        var tags = ImageMetadataReader.ReadMetadata(filePath)
+            .SelectMany(directory => directory.Tags)
+            .Select(tag => new
+            {
+                Tag = tag,
+                Priority = GetDateTagPriority(tag.Name, isPhoto)
+            })
+            .Where(item => item.Priority >= 0)
+            .OrderBy(item => item.Priority);
+
+        foreach (var item in tags)
+        {
+            if (TryParseMetadataDate(item.Tag.Description, out var captureDate))
+            {
+                return captureDate;
+            }
+        }
+    }
+    catch (ImageProcessingException exception)
+    {
+        Console.Error.WriteLine(
+            $"Could not read capture date from '{filePath}'; using last-modified date. {exception.Message}");
+    }
+
+    return File.GetLastWriteTime(filePath);
+}
+
+static int GetDateTagPriority(string tagName, bool isPhoto)
+{
+    var normalizedName = tagName.Replace(" ", string.Empty, StringComparison.Ordinal)
+        .Replace("/", string.Empty, StringComparison.Ordinal)
+        .Replace(":", string.Empty, StringComparison.Ordinal);
+
+    if (normalizedName.Equals("mediacreated", StringComparison.OrdinalIgnoreCase) ||
+        normalizedName.Equals("mediacreatedate", StringComparison.OrdinalIgnoreCase) ||
+        normalizedName.Equals("mediacreateddate", StringComparison.OrdinalIgnoreCase) ||
+        normalizedName.Equals("mediacreationdate", StringComparison.OrdinalIgnoreCase))
+    {
+        return 0;
+    }
+
+    if (isPhoto)
+    {
+        return normalizedName.ToLowerInvariant() switch
+        {
+            "date" => 1,
+            "datetimeoriginal" => 2,
+            "datecreated" => 3,
+            "datetimedigitized" => 4,
+            "createdate" => 5,
+            "datetime" => 6,
+            _ => -1
+        };
+    }
+
+    return normalizedName.ToLowerInvariant() switch
+    {
+        "date" => 1,
+        "datetimeoriginal" => 2,
+        "created" => 3,
+        "creationtime" => 4,
+        "creationdate" => 5,
+        "datecreated" => 6,
+        "datetime" => 7,
+        _ => -1
+    };
+}
+
+static bool TryParseMetadataDate(string? value, out DateTime date)
+{
+    var exifDateFormats = new[]
+    {
+        "yyyy:MM:dd HH:mm:ss",
+        "yyyy:MM:dd HH:mm:ss.FFF",
+        "yyyy:MM:dd HH:mm:sszzz",
+        "yyyy:MM:dd HH:mm:ss.FFFzzz"
+    };
+
+    if (!string.IsNullOrWhiteSpace(value))
+    {
+        if (DateTime.TryParseExact(
+                value,
+                exifDateFormats,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeLocal,
+                out date) ||
+            DateTime.TryParse(
+                value,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeLocal,
+                out date))
+        {
+            return true;
+        }
+    }
+
+    date = default;
+    return false;
 }
 
 static string? PromptForFolder()
