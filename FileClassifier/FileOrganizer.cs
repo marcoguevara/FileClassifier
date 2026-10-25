@@ -6,22 +6,48 @@ namespace FileClassifier;
 
 internal sealed record OrganizationProgress(string Stage, int Completed, int Total, string CurrentFile);
 
-internal sealed record OrganizationResult(int Moved, int Failed, int Completed, int Total, bool Cancelled);
+internal sealed record PlannedFile(string SourcePath, string DestinationPath);
+
+internal sealed record OrganizationPlan(
+    string RootPath,
+    IReadOnlyList<PlannedFile> Files,
+    int Failed,
+    int Total,
+    bool Cancelled);
+
+internal sealed record OrganizationResult(
+    int Moved,
+    int Failed,
+    int Completed,
+    int Total,
+    int RemovedDirectories,
+    bool Cancelled);
 
 internal static class FileOrganizer
 {
-    public static Task<OrganizationResult> OrganizeFolderAsync(
+    public static Task<OrganizationPlan> BuildPlanAsync(
         string sourcePath,
         IProgress<OrganizationProgress> progress,
         Action<string> log,
         CancellationToken cancellationToken)
     {
         return Task.Run(
-            () => OrganizeFolder(sourcePath, progress, log, cancellationToken),
+            () => BuildPlan(sourcePath, progress, log, cancellationToken),
             cancellationToken);
     }
 
-    private static OrganizationResult OrganizeFolder(
+    public static Task<OrganizationResult> ExecutePlanAsync(
+        OrganizationPlan plan,
+        IProgress<OrganizationProgress> progress,
+        Action<string> log,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(
+            () => ExecutePlan(plan, progress, log, cancellationToken),
+            cancellationToken);
+    }
+
+    private static OrganizationPlan BuildPlan(
         string sourcePath,
         IProgress<OrganizationProgress> progress,
         Action<string> log,
@@ -33,14 +59,15 @@ internal static class FileOrganizer
             throw new DirectoryNotFoundException($"Folder not found: {fullSourcePath}");
         }
 
-        var spanishCulture = CultureInfo.GetCultureInfo("es-ES");
         progress.Report(new OrganizationProgress("Searching for files...", 0, 0, string.Empty));
         var sourceFiles = Directory
             .EnumerateFiles(fullSourcePath, "*", SearchOption.AllDirectories)
-            .Where(sourceFile => !IsInOrganizedFolder(fullSourcePath, sourceFile, spanishCulture))
+            .Where(sourceFile => !IsInOrganizedFolder(fullSourcePath, sourceFile))
             .ToArray();
 
-        var movedCount = 0;
+        var englishCulture = CultureInfo.GetCultureInfo("en-US");
+        var plannedFiles = new List<PlannedFile>(sourceFiles.Length);
+        var reservedDestinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var failedCount = 0;
         var processedCount = 0;
 
@@ -55,24 +82,25 @@ internal static class FileOrganizer
             {
                 var fileDate = GetDateForOrganization(sourceFile, log);
                 var yearFolder = fileDate.ToString("yyyy", CultureInfo.InvariantCulture);
-                var monthName = spanishCulture.TextInfo.ToTitleCase(fileDate.ToString("MMMM", spanishCulture));
+                var monthName = englishCulture.TextInfo.ToTitleCase(fileDate.ToString("MMMM", englishCulture));
                 var monthFolder = $"{fileDate:MM} - {monthName}";
                 var destinationDirectory = Path.Combine(fullSourcePath, yearFolder, monthFolder);
-                Directory.CreateDirectory(destinationDirectory);
-
                 var fileName = Path.GetFileName(sourceFile);
                 var destinationFile = Path.Combine(destinationDirectory, fileName);
-                if (File.Exists(destinationFile))
+                if (File.Exists(destinationFile) || reservedDestinations.Contains(destinationFile))
                 {
-                    destinationFile = GetAvailableDestinationPath(destinationDirectory, fileName);
+                    destinationFile = GetAvailableDestinationPath(
+                        destinationDirectory,
+                        fileName,
+                        reservedDestinations);
                 }
 
-                File.Move(sourceFile, destinationFile);
-                movedCount++;
+                reservedDestinations.Add(destinationFile);
+                plannedFiles.Add(new PlannedFile(sourceFile, destinationFile));
             }
             catch (IOException exception)
             {
-                log($"Could not move '{sourceFile}': {exception.Message}");
+                log($"Could not prepare '{sourceFile}': {exception.Message}");
                 failedCount++;
             }
             catch (UnauthorizedAccessException exception)
@@ -83,18 +111,115 @@ internal static class FileOrganizer
 
             processedCount++;
             progress.Report(new OrganizationProgress(
-                "Organizing files...",
+                "Building preview...",
                 processedCount,
                 sourceFiles.Length,
                 sourceFile));
         }
 
+        return new OrganizationPlan(
+            fullSourcePath,
+            plannedFiles,
+            failedCount,
+            sourceFiles.Length,
+            cancellationToken.IsCancellationRequested);
+    }
+
+    private static OrganizationResult ExecutePlan(
+        OrganizationPlan plan,
+        IProgress<OrganizationProgress> progress,
+        Action<string> log,
+        CancellationToken cancellationToken)
+    {
+        var movedCount = 0;
+        var failedCount = plan.Failed;
+        var processedCount = 0;
+
+        foreach (var file in plan.Files)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(file.DestinationPath)!);
+                File.Move(file.SourcePath, file.DestinationPath);
+                movedCount++;
+            }
+            catch (IOException exception)
+            {
+                log($"Could not move '{file.SourcePath}': {exception.Message}");
+                failedCount++;
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                log($"Access denied for '{file.SourcePath}': {exception.Message}");
+                failedCount++;
+            }
+
+            processedCount++;
+            progress.Report(new OrganizationProgress(
+                "Organizing files...",
+                processedCount,
+                plan.Files.Count,
+                file.SourcePath));
+        }
+
+        var removedDirectories = RemoveEmptyDirectories(plan.RootPath, log);
         return new OrganizationResult(
             movedCount,
             failedCount,
             processedCount,
-            sourceFiles.Length,
-            cancellationToken.IsCancellationRequested);
+            plan.Files.Count,
+            removedDirectories,
+            plan.Cancelled || cancellationToken.IsCancellationRequested);
+    }
+
+    private static int RemoveEmptyDirectories(string rootPath, Action<string> log)
+    {
+        var removedCount = 0;
+        string[] directories;
+        try
+        {
+            directories = Directory
+                .EnumerateDirectories(rootPath, "*", SearchOption.AllDirectories)
+                .OrderByDescending(directory => directory.Length)
+                .ToArray();
+        }
+        catch (IOException exception)
+        {
+            log($"Could not enumerate directories for empty-folder cleanup: {exception.Message}");
+            return removedCount;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            log($"Access denied while finding empty folders to clean up: {exception.Message}");
+            return removedCount;
+        }
+
+        foreach (var directory in directories)
+        {
+            try
+            {
+                if (!Directory.EnumerateFileSystemEntries(directory).Any())
+                {
+                    Directory.Delete(directory);
+                    removedCount++;
+                }
+            }
+            catch (IOException exception)
+            {
+                log($"Could not remove empty folder '{directory}': {exception.Message}");
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                log($"Access denied removing empty folder '{directory}': {exception.Message}");
+            }
+        }
+
+        return removedCount;
     }
 
     private static DateTime GetDateForOrganization(string filePath, Action<string> reportError)
@@ -242,7 +367,7 @@ internal static class FileOrganizer
         return false;
     }
 
-    private static bool IsInOrganizedFolder(string rootPath, string filePath, CultureInfo spanishCulture)
+    private static bool IsInOrganizedFolder(string rootPath, string filePath)
     {
         var relativeDirectory = Path.GetRelativePath(rootPath, Path.GetDirectoryName(filePath)!);
         var directoryParts = relativeDirectory.Split(
@@ -264,12 +389,19 @@ internal static class FileOrganizer
             return false;
         }
 
-        var monthName = spanishCulture.TextInfo.ToTitleCase(
-            new DateTime(year, month, 1).ToString("MMMM", spanishCulture));
-        return directoryParts[1] == $"{month:00} - {monthName}";
+        var date = new DateTime(year, month, 1);
+        var englishCulture = CultureInfo.GetCultureInfo("en-US");
+        var englishMonth = englishCulture.TextInfo.ToTitleCase(date.ToString("MMMM", englishCulture));
+        var spanishCulture = CultureInfo.GetCultureInfo("es-ES");
+        var spanishMonth = spanishCulture.TextInfo.ToTitleCase(date.ToString("MMMM", spanishCulture));
+        return directoryParts[1] == $"{month:00} - {englishMonth}" ||
+               directoryParts[1] == $"{month:00} - {spanishMonth}";
     }
 
-    private static string GetAvailableDestinationPath(string destinationDirectory, string fileName)
+    private static string GetAvailableDestinationPath(
+        string destinationDirectory,
+        string fileName,
+        HashSet<string> reservedDestinations)
     {
         var nameWithoutExtension = Path.GetFileNameWithoutExtension(fileName);
         var extension = Path.GetExtension(fileName);
@@ -283,7 +415,7 @@ internal static class FileOrganizer
                 $"{nameWithoutExtension} ({suffix}){extension}");
             suffix++;
         }
-        while (File.Exists(candidatePath));
+        while (File.Exists(candidatePath) || reservedDestinations.Contains(candidatePath));
 
         return candidatePath;
     }

@@ -11,9 +11,11 @@ dotnet build .\FileClassifier\FileClassifier.csproj
 dotnet run --project .\FileClassifier\FileClassifier.csproj
 ```
 
-Choose a folder with **Examinar...** or drag a folder onto the app. Files in that folder and its subfolders are organized recursively. The app shows progress and allows the operation to be cancelled.
+Choose a folder with **Browse...** or drag a folder onto the app. Select **Preview** to view the planned `YEAR\MM - Month\filename` tree before moving anything. Select **Organize Files** to proceed. Files in the selected folder and its subfolders are organized recursively. The app shows progress and allows the operation to be cancelled.
 
-Photos and videos use a date from names matching `IMG_YYYYMMDD_XXXXXX` or `VID_YYYYMMDD_XXXXXX` first, then metadata dates, and finally the last-modified date. Other files use the last-modified date. Existing `YEAR\MM - Month` folders are skipped.
+Photos and videos use a date from names matching `IMG_YYYYMMDD_XXXXXX` or `VID_YYYYMMDD_XXXXXX` first, then metadata dates, and finally the last-modified date. Other files use the last-modified date. New folders use English month names. Existing folders using English or Spanish month names are skipped.
+
+After organizing, the app removes empty subfolders under the selected folder. Folders that still contain files that could not be moved are kept.
 
 ## Export a standalone executable
 
