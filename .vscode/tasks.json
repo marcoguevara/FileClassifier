@@ -20,6 +20,7 @@
             "args": [
                 "publish",
                 "${workspaceFolder}/FileClassifier/FileClassifier.csproj",
+                "/property:PublishProfile=win-x64",
                 "/property:GenerateFullPaths=true",
                 "/consoleloggerparameters:NoSummary;ForceNoAlign"
             ],
